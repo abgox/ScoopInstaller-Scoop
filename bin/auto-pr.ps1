@@ -92,38 +92,15 @@ Optional options:
     exit 0
 }
 
-if ($IsLinux -or $IsMacOS) {
-    if (!(which hub)) {
-        Write-Host "Please install hub ('brew install hub' or visit: https://hub.github.com/)" -ForegroundColor Yellow
-        exit 1
-    }
-} else {
-    if (!(scoop which hub)) {
-        Write-Host "Please install hub 'scoop install hub'" -ForegroundColor Yellow
-        exit 1
-    }
-}
-
-function execute($cmd, [ScriptBlock] $onError) {
-    Write-Host $cmd -ForegroundColor Green
-    $output = Invoke-Command ([scriptblock]::Create($cmd))
-
-    if ($LASTEXITCODE -gt 0) {
-        if ($onError) { Invoke-Command $onError }
-        abort "^^^ Error! See above ^^^ (last command: $cmd)"
-    }
-
-    return $output
-}
-
 function pull_requests($json, [String] $app, [String] $upstream, [String] $manifest, [String] $commitMessage) {
     $version = $json.version
     $homepage = $json.homepage
     $branch = "manifest/$app-$version"
+    $upstreamRepo, $upstreamBranch = $upstream -split ':', 2
 
-    execute "hub checkout $OriginBranch"
-    Write-Host "hub rev-parse --verify $branch" -ForegroundColor Green
-    hub rev-parse --verify $branch
+    git checkout $OriginBranch
+    Write-Host "git rev-parse --verify $branch" -ForegroundColor Green
+    git rev-parse --verify $branch
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Skipping update $app ($version) ..." -ForegroundColor Yellow
@@ -131,21 +108,21 @@ function pull_requests($json, [String] $app, [String] $upstream, [String] $manif
     }
 
     Write-Host "Creating update $app ($version) ..." -ForegroundColor DarkCyan
-    execute "hub checkout -b $branch"
-    execute "hub add $manifest"
-    execute "hub commit -m '$commitMessage"
+    git checkout -B $branch
+    git add $manifest
+    git commit -m $commitMessage
     Write-Host "Pushing update $app ($version) ..." -ForegroundColor DarkCyan
-    execute "hub push origin $branch"
+    git push origin $branch
 
     if ($LASTEXITCODE -gt 0) {
-        error "Push failed! (hub push origin $branch)"
-        execute 'hub reset'
+        error "Push failed! (git push origin $branch)"
+        git reset --hard
         return
     }
 
     Start-Sleep 1
     Write-Host "Pull-Request update $app ($version) ..." -ForegroundColor DarkCyan
-    Write-Host "hub pull-request -m '<msg>' -b '$upstream' -h '$branch'" -ForegroundColor Green
+    Write-Host "gh pr create --repo '$upstreamRepo' --base '$upstreamBranch' --head '$branch' --title '<commitMessage>' --body '<msg>'" -ForegroundColor Green
 
     $msg = @"
 $commitMessage
@@ -158,31 +135,32 @@ a new version of [$app]($homepage) is available.
 | New version | $version        |
 "@
 
-    hub pull-request -m "$msg" -b "$upstream" -h "$branch"
+    gh pr create --repo "$upstreamRepo" --base "$upstreamBranch" --head "$branch" --title "$commitMessage" --body "$msg"
+
     if ($LASTEXITCODE -gt 0) {
-        execute 'hub reset'
-        abort "Pull Request failed! (hub pull-request -m '$commitMessage' -b '$upstream' -h '$branch')"
+        git reset --hard
+        abort "Pull Request failed! (gh pr create --repo '$upstreamRepo' --base '$upstreamBranch' --head '$branch' --title '<commitMessage>' --body '<msg>')"
     }
 }
 
 Write-Host 'Updating ...' -ForegroundColor DarkCyan
 if ($Push) {
-    execute "hub pull origin $OriginBranch"
-    execute "hub checkout $OriginBranch"
+    git pull origin $OriginBranch
+    git checkout $OriginBranch
 } else {
-    execute "hub pull upstream $OriginBranch"
-    execute "hub push origin $OriginBranch"
+    git pull upstream $OriginBranch
+    git push origin $OriginBranch
 }
 
 . "$PSScriptRoot\checkver.ps1" -App $App -Dir $Dir -Update -SkipUpdated:$SkipUpdated -ThrowError:$ThrowError
 if ($SpecialSnowflakes) {
     Write-Host "Forcing update on our special snowflakes: $($SpecialSnowflakes -join ',')" -ForegroundColor DarkCyan
-    $SpecialSnowflakes -split ',' | ForEach-Object {
+    $SpecialSnowflakes | ForEach-Object {
         . "$PSScriptRoot\checkver.ps1" $_ -Dir $Dir -ForceUpdate -ThrowError:$ThrowError
     }
 }
 
-hub diff --name-only | ForEach-Object {
+git diff --name-only HEAD | ForEach-Object {
     $manifest = $_
     if (!$manifest.EndsWith('.json')) {
         return
@@ -198,13 +176,13 @@ hub diff --name-only | ForEach-Object {
     $CommitMessage = $CommitMessageFormat -replace '<app>',$app -replace '<version>',$version
     if ($Push) {
         Write-Host "Creating update $app ($version) ..." -ForegroundColor DarkCyan
-        execute "hub add $manifest"
+        git add $manifest
 
         # detect if file was staged, because it's not when only LF or CRLF have changed
-        $status = execute 'hub status --porcelain -uno'
+        $status = git status --porcelain -uno
         $status = $status | Where-Object { $_ -match "M\s{2}.*$app.json" }
         if ($status -and $status.StartsWith('M  ') -and $status.EndsWith("$app.json")) {
-            execute "hub commit -m '$commitMessage'"
+            git commit -m $commitMessage
         } else {
             Write-Host "Skipping $app because only LF/CRLF changes were detected ..." -ForegroundColor Yellow
         }
@@ -217,10 +195,10 @@ if ($Push) {
     Write-Host 'Rebasing local branch before push ...' -ForegroundColor DarkCyan
     execute "hub pull --rebase --autostash origin $OriginBranch" { hub rebase --abort 2>$null; hub reset --hard }
     Write-Host 'Pushing updates ...' -ForegroundColor DarkCyan
-    execute "hub push origin $OriginBranch"
+    git push origin $OriginBranch
 } else {
     Write-Host "Returning to $OriginBranch branch and removing unstaged files ..." -ForegroundColor DarkCyan
-    execute "hub checkout -f $OriginBranch"
+    git checkout -f $OriginBranch
 }
 
-execute 'hub reset --hard'
+git reset --hard
